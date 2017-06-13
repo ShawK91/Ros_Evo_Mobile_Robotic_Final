@@ -11,16 +11,11 @@ import time
 import numpy as np, os
 import mod_mdt as mod, sys
 from random import randint
-from torch.autograd import Variable
-import torch.nn as nn, torch
-from torch.nn import Parameter
-import torch.nn.functional as F
-import torch
 import random
 from operator import add
 
 
-is_probe= False
+include_coord = True
 class Tracker(): #Tracker
     def __init__(self, parameters):
         self.foldername = parameters.save_foldername + '/0000_CSV'
@@ -58,7 +53,8 @@ class SSNE_param:
     def __init__(self):
         self.num_input = 35
         self.num_hnodes = 25
-        self.num_output = 3
+        self.num_output = 2
+        if include_coord: self.num_input += 2
 
         self.elite_fraction = 0.04
         self.crossover_prob = 0.05
@@ -72,9 +68,8 @@ class Parameters:
     def __init__(self):
 
         #SSNE stuff
-        self.spread_exp = True
-        self.population_size = 100
-        self.load_seed = False
+        self.population_size = 25
+        self.load_pop = True
         self.ssne_param = SSNE_param()
         self.total_gens = 10000
         #Determine the nerual archiecture
@@ -83,8 +78,7 @@ class Parameters:
                            #3 FF
                            # QUASI_GECCO
 
-        self.timesteps = 10
-
+        self.timesteps = 6
 
 
         self.output_activation = 'tanh'
@@ -96,49 +90,24 @@ class Parameters:
 
         self.save_foldername = 'R_AutoNomous_TMaze/'
 
-        # # BackProp
-        # self.bprop_max_gens = 100
-        # self.bprop_train_examples = 1000
-        # self.skip_bprop = False
-        # self.load_bprop_seed = False  # Loads a seed population from the save_foldername
-        # # IF FALSE: Runs Backpropagation, saves it and uses that
-
-
         if not os.path.exists(self.save_foldername):
             os.makedirs(self.save_foldername)
 
-        #Overrides
-        if is_probe: self.load_seed = True #Overrides
 
 class Agent_Pop:
     def __init__(self, parameters, i, is_static=False):
         self.parameters = parameters; self.ssne_param = self.parameters.ssne_param
         self.num_input = self.ssne_param.num_input; self.num_hidden = self.ssne_param.num_hnodes; self.num_output = self.ssne_param.num_output
         self.agent_id = i
-        self.is_static = is_static
 
         #####CREATE POPULATION
         self.pop = []
-        if is_static: #Static policy agent
-            for i in range(self.parameters.population_size):
-                self.pop.append(Static_policy(parameters))
-        else:
-            for i in range(self.parameters.population_size):
-                if self.parameters.load_seed and i == 0: #Load seed if option
-                    self.pop.append(self.load('champion_' + str(self.agent_id)))
-
-                #Choose architecture
-                if self.parameters.arch_type == "GRUMB":
-                    self.pop.append(mod.PT_GRUMB(self.num_input, self.num_hidden, self.num_output, output_activation=self.parameters.output_activation))
-                elif self.parameters.arch_type == "FF":
-                    self.pop.append(mod.PT_FF(self.num_input, self.num_hidden, self.num_output, output_activation=self.parameters.output_activation))
-                elif self.parameters.arch_type == "LSTM":
-                    self.pop.append(mod.PT_LSTM(self.num_input, self.num_hidden, self.num_output, output_activation=self.parameters.output_activation))
-                elif self.parameters.arch_type == "QUASI_GRUMB":
-                    self.pop.append(mod.Quasi_GRUMB(self.num_input, self.num_hidden, self.num_output))
-                else:
-                    sys.exit('Invalid choice of architecture')
-        self.champion_ind = None
+        for i in range(self.parameters.population_size):
+            if self.parameters.load_pop:
+                self.pop.append(self.load(self.parameters.save_foldername + 'Pop/' + str(i)))
+            else:
+                self.pop.append(mod.Quasi_GRUMB(self.num_input, self.num_hidden, self.num_output))
+            self.champion_ind = None
 
         #Fitness evaluation list for the generation
         self.fitness_evals = [0.0] * self.parameters.population_size
@@ -149,9 +118,14 @@ class Agent_Pop:
         self.fitness_evals = [0.0] * self.parameters.population_size
 
 
+    def save(self, individual, filename ):
+        mod.pickle_object(individual, filename)
+        #torch.save(individual, filename)
+        #return individual.saver.save(individual.sess, self.save_foldername + filename)
 
     def load(self, filename):
-        return torch.load(self.parameters.save_foldername + filename)
+        return mod.unpickle(filename)
+        #return torch.load(filename)
 
 class Task_ROS_TMaze: #Autonomous Navigation T-Maze
     def __init__(self, parameters):
@@ -163,7 +137,6 @@ class Task_ROS_TMaze: #Autonomous Navigation T-Maze
 
         #####Initiate the agent
         self.agent = Agent_Pop(parameters, 0)
-        if is_probe: self.run_probe() #Run probe and end the program
 
         #ROS stuff
         self.oracle_x = [[-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1], [1, -1, -1], [1, -1, 1], [1, 1, -1],
@@ -194,19 +167,9 @@ class Task_ROS_TMaze: #Autonomous Navigation T-Maze
         self.max_speed = 1.0
 
         self.is_pursuing = False
+        self.pursue_status = 1
         self.scan_readings = None
         self.base_odom = Pose()
-
-    def run_probe(self):
-        team_ind = [0]*self.parameters.num_agents #Grab all the loaded champions
-
-        set_train_x, set_train_y = self.get_training_maze(self.parameters.num_train_evals)
-        fitnesses = [0] * self.parameters.num_agents
-        for train_x, train_y in zip(set_train_x, set_train_y):  # For all maps in the training set
-            fitnesses = map(add, fitnesses, self.compute_fitness(team_ind, train_x, train_y) / self.parameters.num_train_evals)  # Returns rewards for each member of the team for each individual training map
-        #TODO FINISH PROBE
-
-        sys.exit('PROBE COMPLETED')
 
     def save(self, individual, filename ):
         mod.pickle_object(individual, filename)
@@ -220,31 +183,6 @@ class Task_ROS_TMaze: #Autonomous Navigation T-Maze
     def predict(self, individual, input): #Runs the individual net and computes and output by feedforwarding
         return individual.predict(input)
 
-    def run_bprop(self, model):
-        if self.parameters.skip_bprop: return
-        criterion = torch.nn.L1Loss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-        train_x, train_y = self.test_sequence_data(self.parameters.bprop_train_examples, self.parameters.seq_len_train)
-
-        for epoch in range(1, self.parameters.bprop_max_gens):
-            epoch_loss = 0.0
-            for example in range(len(train_x)):  # For all examples
-                out = model.forward(train_x[example])
-
-                # Compare with target and compute loss
-                y = Variable(torch.Tensor(train_y[example])); y = y.unsqueeze(0)
-                loss = criterion(out, y)
-                optimizer.zero_grad()
-                loss.backward(retain_variables=True)
-                optimizer.step()
-                epoch_loss += loss.data.numpy()[0]
-            print 'Epoch: ', epoch, ' Loss: ', epoch_loss / len(train_x)
-
-
-
-        self.save(model, self.save_foldername + 'bprop_simulator') #Save individual
-
     def compute_fitness(self, net):
         net.reset(); fitness = 0.0
         for goal_y, x, y in zip(self.oracle_goals, self.oracle_x, self.oracle_y): #All endpoints
@@ -256,26 +194,57 @@ class Task_ROS_TMaze: #Autonomous Navigation T-Maze
 
             # Let GRUMB controller go to goal
             for step in range(self.parameters.timesteps):
-                net_inp = x + self.scan_readings
+                if include_coord:
+                    net_inp = x + [self.base_odom.pose.position.x, self.base_odom.pose.position.y] + self.scan_readings
+                else:
+                    net_inp = x + self.scan_readings
                 net_out = net.forward(net_inp)
 
-                print net_out
-                self.action.linear.x = net_out[0][0]
-                self.action.angular.z = net_out[1][0]
-                self.action.linear.y = net_out[2][0]
-                self.pub.publish(self.action)  # Send control
-                time.sleep(0.1)
-                print 'Action'
+                #print net_out
+                waypoint = [[self.base_odom.pose.position.x, self.base_odom.pose.position.y]]
+                waypoint[0][0] += net_out[0][0]
+                waypoint[0][1] += net_out[1][0]
+
+                #Check if wapont is feasible
+                is_feasible = self.is_feasible(waypoint[0][0], waypoint[0][1])
+
+                if not is_feasible:
+                    fitness-= 100.0
+                    continue
+
+                waypoint = self.format_goal(waypoint)
+                self.goal_pub.publish(waypoint[0])  # Send goal
+                time.sleep(0.3)
+                while self.pursue_status == 1: None
+                if self.pursue_status == 4:
+                    fitness -= 100.0
+
 
             #Compute closeness with goal
             #print self.base_odom
             fitness -= abs(self.base_odom.pose.position.x - y[0]) + abs(self.base_odom.pose.position.y - y[1])
-            print fitness
+            #print 'FITNESS: ', fitness
+            break #TODO ONLY FIRST PATH HACK
         return fitness
 
+    def is_feasible(self, x,y):
+        if x >= 3.5 and x <= 6.5:
+            if y<=4.5 or y>=5.5:
+                return False
 
+        if x >= 2.2 and x <= 4.5:
+            if y>=1.5 and y<=4.5 or y>=5.5 and y<=8.5:
+                return False
 
+        if x >= 5.5 and x <= 7.5:
+            if y>=1.3 and y<=4.5 or y>=5.5 and y<=8.5:
+                return False
 
+        if x >= 8.5 or x<=1.5:
+            if y >= 1.3 and y <= 8.5:
+                return False
+
+        return True
 
     def update_command(self, cmd):
         if self.is_record:
@@ -292,15 +261,17 @@ class Task_ROS_TMaze: #Autonomous Navigation T-Maze
         scan_readings = scan_readings[::20]
         self.scan_readings = list(scan_readings)
 
-
-
     def update_goal_status(self, status):
         l = status.status_list
         # print len(l)
+
         if len(l) > 0:
+            self.pursue_status = l[-1].status
             if l[-1].status == 1:
                 self.is_pursuing = True
             elif l[-1].status == 3:
+                self.is_pursuing = False
+            elif l[-1].status == 4:
                 self.is_pursuing = False
 
     def format_goal(self, vals):
@@ -318,12 +289,8 @@ class Task_ROS_TMaze: #Autonomous Navigation T-Maze
             goals.append(y)
         return goals
 
-
-
-
-
     def evolve(self, gen):
-        tr_best_gen_fitness = 0.0
+        tr_best_gen_fitness = -1000000000.0
 
         #Reset Agent
         self.agent.reset()
@@ -333,10 +300,11 @@ class Task_ROS_TMaze: #Autonomous Navigation T-Maze
             # SIMULATION AND TRACK REWARD
             fitness = self.compute_fitness(net)
             self.agent.fitness_evals[index] = fitness
+            if fitness > tr_best_gen_fitness: tr_best_gen_fitness = fitness
 
 
         #Save population and HOF
-        if gen % 100 == 0:
+        if gen % 10 == 0:
 
             ig_folder = self.parameters.save_foldername + '/Pop/'
             if not os.path.exists(ig_folder): os.makedirs(ig_folder)
@@ -351,26 +319,6 @@ class Task_ROS_TMaze: #Autonomous Navigation T-Maze
 
         return tr_best_gen_fitness
 
-    def get_training_maze(self, num_examples):
-        set_x = []; set_y = []
-        for _ in range(num_examples):
-
-            # Distraction/Hallway parts
-            train_x = []; train_y = [[],[],[]]
-            for junction in range(self.parameters.depth):
-                corridor_len = randint(self.parameters.corridor_bound[0], self.parameters.corridor_bound[1])
-                for i in range(corridor_len-1, -1, -1):
-                    train_x.append(i)
-                for div in train_y:
-                    div.append(1 if random.random()<0.5 else -1)
-
-            #Make sure the target (goal location) for each division aren't the same
-            if train_y[0] == train_y[1]: train_y[0][randint(0, self.parameters.depth -1)] *= -1
-            if train_y[1] == train_y[2]: train_y[2][randint(0, self.parameters.depth - 1)] *= -1
-
-            set_x.append(train_x); set_y.append(train_y)
-
-        return set_x, set_y
 
 
 if __name__ == "__main__":
@@ -380,8 +328,6 @@ if __name__ == "__main__":
 
     # ROS stuff
     task = Task_ROS_TMaze(parameters)
-
-
 
     #EVOLVE
     for gen in range(1, parameters.total_gens):
